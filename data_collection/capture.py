@@ -166,4 +166,4 @@ def packet_handler(packet):
         print("-" * 50)
 
 # Capture packets
-sniff(iface='mon1', prn=packet_handler, count=10)
+#sniff(iface='mon1', prn=packet_handler, count=10)

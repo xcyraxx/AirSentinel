@@ -1,11 +1,11 @@
 from scapy.sendrecv import sniff
 import numpy as np
 import pandas as pd
-import json
 from capture import extract_ap_features
 from collections import defaultdict
 from datetime import datetime, timedelta
 from scapy.all import rdpcap
+from json_output import create_output_data, save_to_json, print_save_summary, check_suspicious_aps
 
 class FeatureExtractor:
     def __init__(self, use_packet_time=False):
@@ -339,45 +339,27 @@ def process_pcap(pcap_file, output_dir="../data"):
             feature_vectors.append(features)
             bssids.append(bssid)
     
-    # Create output JSON
-    output_data = {
-        'timestamp': datetime.now().isoformat(),
-        'capture_duration': (extractor.last_packet_time - extractor.first_packet_time).total_seconds() if extractor.use_packet_time else None,
-        'total_aps': len(bssids),
-        'access_points': []
-    }
+    # Calculate capture duration
+    capture_duration = None
+    if extractor.use_packet_time and extractor.first_packet_time and extractor.last_packet_time:
+        capture_duration = (extractor.last_packet_time - extractor.first_packet_time).total_seconds()
     
-    for i, bssid in enumerate(bssids):
-        ap_data = {
-            'bssid': bssid,
-            'ssid': extractor.bssid_info[bssid]['ssid'],
-            'vendor': extractor.bssid_info[bssid]['vendor'],
-            'features': {}
-        }
-        
-        for key, value in feature_vectors[i].items():
-            if isinstance(value, (np.integer, np.floating)):
-                ap_data['features'][key] = float(value)
-            elif isinstance(value, np.ndarray):
-                ap_data['features'][key] = value.tolist()
-            else:
-                ap_data['features'][key] = value
-        
-        output_data['access_points'].append(ap_data)
+    # Create output data using json_output module
+    output_data = create_output_data(
+        bssids=bssids,
+        feature_vectors=feature_vectors,
+        bssid_info=extractor.bssid_info,
+        capture_duration=capture_duration
+    )
     
     # Save to file
-    json_filename = f"features_pcap_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    filepath = f"{output_dir}/{json_filename}"
-    with open(filepath, 'w') as f:
-        json.dump(output_data, f, indent=2)
+    filepath = save_to_json(output_data, output_dir, mode='pcap')
     
-    print(f"[+] Extracted features for {len(bssids)} access points")
-    print(f"[+] Saved to: {filepath}")
+    # Print summary
+    print_save_summary(output_data, filepath)
     
     # Show suspicious APs
-    suspicious_count = sum(1 for features in feature_vectors if features['ssid_bssid_count'] > 1)
-    if suspicious_count > 0:
-        print(f"\nWARNING: {suspicious_count} APs with multiple BSSIDs detected!")
+    check_suspicious_aps(feature_vectors)
     
     return output_data
 
@@ -409,39 +391,18 @@ def process_live(interface="mon1", count=200, output_dir="../data"):
             feature_vectors.append(features)
             bssids.append(bssid)
     
-    # Create output JSON
-    output_data = {
-        'timestamp': datetime.now().isoformat(),
-        'total_aps': len(bssids),
-        'access_points': []
-    }
-    
-    for i, bssid in enumerate(bssids):
-        ap_data = {
-            'bssid': bssid,
-            'ssid': extractor.bssid_info[bssid]['ssid'],
-            'vendor': extractor.bssid_info[bssid]['vendor'],
-            'features': {}
-        }
-        
-        for key, value in feature_vectors[i].items():
-            if isinstance(value, (np.integer, np.floating)):
-                ap_data['features'][key] = float(value)
-            elif isinstance(value, np.ndarray):
-                ap_data['features'][key] = value.tolist()
-            else:
-                ap_data['features'][key] = value
-        
-        output_data['access_points'].append(ap_data)
+    # Create output data using json_output module
+    output_data = create_output_data(
+        bssids=bssids,
+        feature_vectors=feature_vectors,
+        bssid_info=extractor.bssid_info
+    )
     
     # Save to file
-    json_filename = f"features_live_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    filepath = f"{output_dir}/{json_filename}"
-    with open(filepath, 'w') as f:
-        json.dump(output_data, f, indent=2)
+    filepath = save_to_json(output_data, output_dir, mode='live')
     
-    print(f"[+] Extracted features for {len(bssids)} access points")
-    print(f"[+] Saved to: {filepath}")
+    # Print summary
+    print_save_summary(output_data, filepath)
     
     return output_data
 

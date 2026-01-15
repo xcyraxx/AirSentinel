@@ -2,10 +2,43 @@ from scapy.sendrecv import sniff
 import numpy as np
 import pandas as pd
 from capture import extract_ap_features
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from scapy.all import rdpcap
-from json_output import create_output_data, save_to_json, print_save_summary, check_suspicious_aps
+from json_output import create_output_data, save_to_json, print_save_summary
+
+class RollingBuffer:
+	def __init__(self, max_age_seconds):
+		self.max_age = timedelta(seconds=(max_age_seconds-1))
+		self.buffer = deque()
+		
+	def append(self, item):
+		# item should have 'timestamp' field
+		
+		self.buffer.append(item)
+		self._expire_old(item['timestamp'])
+		
+	def _expire_old(self, current_time):
+		cutoff = current_time - self.max_age
+		while self.buffer and self.buffer[0]['timestamp'] < cutoff:
+			self.buffer.popleft()
+			
+	def get_window(self, window_seconds=None):
+		"""
+		Returns items within last window seconds, if it is None, returns the entire buffer
+		"""
+		
+		if window_seconds is None:
+			return list(self.buffer)
+			
+		cutoff = self.buffer[-1]['timestamp'] - timedelta(seconds=window_seconds)
+		return [item for item in self.buffer if item['timestamp'] >= cutoff]
+		
+	def __len__(self):
+		return len(self.buffer)
+		
+	def empty(self):
+		return len(self.buffer) == 0
 
 class FeatureExtractor:
     def __init__(self, use_packet_time=False):
@@ -14,7 +47,10 @@ class FeatureExtractor:
             use_packet_time: If True, use packet timestamps (for PCAP files)
                            If False, use system time (for live capture)
         """
-        self.ap_observations = defaultdict(list)
+        self.ap_observations = defaultdict(
+        	lambda: RollingBuffer(max_age_seconds=300)  #  Rolling Window size 
+        )
+        
         self.ssid_bssid_map = defaultdict(set)
         self.bssid_info = defaultdict(dict)
         self.use_packet_time = use_packet_time
@@ -97,26 +133,13 @@ class FeatureExtractor:
             reference_time: Time to calculate time_since_first_seen from
                           If None, uses appropriate default based on mode
         """
-        observations = self.ap_observations[bssid]
-        if not observations:
+        buffer = self.ap_observations[bssid]
+        if buffer.empty():
             return None
         
-        # Filter to time window if specified
-        if window_seconds is not None:
-            if self.use_packet_time:
-                # PCAP mode: use last packet time as reference
-                cutoff_time = (self.last_packet_time or observations[-1]['timestamp']) - timedelta(seconds=window_seconds)
-            else:
-                # Live mode: use current time
-                cutoff_time = datetime.now() - timedelta(seconds=window_seconds)
-            
-            recent_obs = [obs for obs in observations 
-                          if obs['timestamp'] > cutoff_time]
-        else:
-            # Use all observations
-            recent_obs = observations
+        recent_obs = buffer.get_window(window_seconds)
         
-        if len(recent_obs) < 5:
+        if not recent_obs or len(recent_obs) < 5:
             return None
         
         # Determine reference time for time_since_first_seen
@@ -193,9 +216,9 @@ class FeatureExtractor:
         current_channel = channels[-1] if channels else None
         for other_bssid in self.ssid_bssid_map[ssid]:
             if other_bssid != bssid:
-                other_obs = self.ap_observations[other_bssid]
-                if other_obs:
-                    other_channel = other_obs[-1]['channel']
+                other_buffer = self.ap_observations[other_bssid]
+                if not other_buffer.empty():
+                    other_channel = other_buffer.buffer[-1]['channel']
                     same_ssid_channels.add(other_channel)
                     if other_channel == current_channel:
                         same_ssid_same_channel_count += 1
@@ -294,13 +317,13 @@ class FeatureExtractor:
             print(f"Total SSIDs:  {len(self.ssid_bssid_map)}")
             print(f"{'='*70}\n")
 
-
+"""
 # =====================================================================
 # USAGE EXAMPLES
 # =====================================================================
 
 def process_pcap(pcap_file, output_dir="../data"):
-    """Process a PCAP file"""
+    # Process a PCAP file
     print(f"[*] Processing PCAP: {pcap_file}")
     
     # IMPORTANT: Set use_packet_time=True for PCAP files
@@ -359,13 +382,13 @@ def process_pcap(pcap_file, output_dir="../data"):
     print_save_summary(output_data, filepath)
     
     # Show suspicious APs
-    check_suspicious_aps(feature_vectors)
+   # check_suspicious_aps(feature_vectors)
     
     return output_data
 
 
 def process_live(interface="mon1", count=200, output_dir="../data"):
-    """Process live capture"""
+    # Process live capture
     print(f"[*] Starting live capture on {interface}")
     
     # IMPORTANT: Set use_packet_time=False for live capture
@@ -421,3 +444,4 @@ if __name__ == "__main__":
     else:
         # Live mode
         process_live()
+"""

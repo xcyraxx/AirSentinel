@@ -1,43 +1,120 @@
+import time
+import os
+import json
+from datetime import datetime
 from scapy.all import sniff
 from capture import extract_ap_features
 from extract import FeatureExtractor
 from channel_hopper import ChannelHopper
-from json_output import create_output_data, save_to_json, print_save_summary
+from json_output import create_output_data, print_save_summary
 
 interface = "wlan0mon"
-hopper = ChannelHopper(interface, channels=[1,6,11], dwell_time=1.0)  # hopping only between non-overlapping channels in 2.4ghz
-hopper.start()														  # hopping on 5GHz channels not done atm , can implement later.
+
+WINDOWS = [30, 120, 300]
+EXTRACT_INTERVAL = 20
+MIN_PACKETS = 5
+
+DATASET_FILE = "../data/overlap_test_dataset.json"
+
+
+if not os.path.exists(DATASET_FILE):
+    with open(DATASET_FILE, "w") as f:
+        json.dump(
+            {
+                "metadata": {
+                    "interface": interface,
+                    "start_time": datetime.now().isoformat(),
+                    "windows": WINDOWS,
+                    "extract_interval": EXTRACT_INTERVAL
+                },
+                "extraction_rounds": []
+            },
+            f,
+            indent=2
+        )
+
+
+hopper = ChannelHopper(
+    interface,
+    channels=[1, 6, 11],
+    dwell_time=1.0
+)
+hopper.start()
 
 extractor = FeatureExtractor(use_packet_time=False)
 
+last_extract = time.time()
+extraction_round = 0
+
+print(f"[*] Starting packet capture on {interface}")
+print(f"[*] Overlapping windows: {WINDOWS}")
+print(f"[*] Extraction interval: {EXTRACT_INTERVAL}s")
+
 def packet_handler(packet):
-	features = extract_ap_features(packet)
-	if features:
-		features['channel'] = hopper.get_current_channel()
-		extractor.observe_packet(features)
-		
-print(f"[*] Starting packet capture on {interface}...")
-sniff(iface=interface, prn=packet_handler, count=200)
-hopper.stop()
-print("[+] Capture completed")
+    global last_extract, extraction_round
 
-feature_vectors = []
-bssids = []
+    features = extract_ap_features(packet)
+    if not features:
+        return
 
-for bssid in extractor.ap_observations.keys():
-	features = extractor.extract_features(bssid, window_seconds=300)
-	if features:
-		feature_vectors.append(features)
-		bssids.append(bssid)
+    extractor.observe_packet(features)
 
-if bssids:
-	output_data = create_output_data(
-		bssids=bssids,
-		feature_vectors=feature_vectors,
-		bssid_info=extractor.bssid_info
-	)
-	
-	filepath = save_to_json(output_data, output_dir="../data", mode='test')
-	print_save_summary(output_data, filepath)
-else:
-	print("[!] No APs detected")
+    now = time.time()
+    if now - last_extract < EXTRACT_INTERVAL:
+        return
+
+    extraction_round += 1
+
+    feature_vectors = []
+    bssids = []
+
+    for bssid in extractor.ap_observations.keys():
+        buffer_len = len(extractor.ap_observations[bssid])
+        if buffer_len < MIN_PACKETS:
+            continue
+
+        for w in WINDOWS:
+            vec = extractor.extract_features(bssid, window_seconds=w)
+            if vec:
+                vec["window_seconds"] = w
+                vec["extraction_round"] = extraction_round
+                feature_vectors.append(vec)
+                bssids.append(bssid)
+
+    if not feature_vectors:
+        last_extract = now
+        return
+
+
+    output_data = create_output_data(
+        bssids=bssids,
+        feature_vectors=feature_vectors,
+        bssid_info=extractor.bssid_info
+    )
+
+	# Writes into the same file, gotta implement jsonl later on
+    with open(DATASET_FILE, "r+") as f:
+        dataset = json.load(f)
+
+        dataset["extraction_rounds"].append({
+            "round": extraction_round,
+            "timestamp": datetime.now().isoformat(),
+            "access_points": output_data["access_points"]
+        })
+
+        f.seek(0)
+        json.dump(dataset, f, indent=2)
+        f.truncate()
+
+    print_save_summary(output_data, DATASET_FILE)
+
+    last_extract = now
+
+
+try:
+    sniff(iface=interface, prn=packet_handler)
+except KeyboardInterrupt:
+    print("\n[!] Stopping capture...")
+finally:
+    hopper.stop()
+    print("[+] Channel hopper stopped")
